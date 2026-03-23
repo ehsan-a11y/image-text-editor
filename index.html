@@ -322,30 +322,57 @@ function detectTextColor(imageData, sx, sy, sw, sh){
   return {color:textColor, bg, isBold};
 }
 
-/* ─── 4-edge bilinear inpainting — seamless bg reconstruction ─── */
+/* ─── smart inpainting: solid bg → exact fill; gradient/texture → bilinear blend ─── */
 function bilinearInpaint(sx, sy, sw, sh){
   const full=ctx.getImageData(0,0,canvas.width,canvas.height);
   const stride=canvas.width, W=canvas.width, H=canvas.height;
+  const PAD=5; // sample this many px outside the bbox
 
-  for(let py=sy;py<sy+sh;py++){
-    for(let px=sx;px<sx+sw;px++){
-      const tx=sw>1?(px-sx)/(sw-1):0.5;
-      const ty=sh>1?(py-sy)/(sh-1):0.5;
+  // collect surrounding border pixels (PAD-wide ring outside bbox)
+  const rs=[],gs=[],bs=[];
+  for(let dp=1;dp<=PAD;dp++){
+    for(let px=Math.max(0,sx-PAD);px<Math.min(W,sx+sw+PAD);px++){
+      if(sy-dp>=0){ const i=((sy-dp)*stride+px)*4; rs.push(full.data[i]);gs.push(full.data[i+1]);bs.push(full.data[i+2]); }
+      if(sy+sh+dp-1<H){ const i=((sy+sh+dp-1)*stride+px)*4; rs.push(full.data[i]);gs.push(full.data[i+1]);bs.push(full.data[i+2]); }
+    }
+    for(let py=sy;py<sy+sh;py++){
+      if(sx-dp>=0){ const i=(py*stride+(sx-dp))*4; rs.push(full.data[i]);gs.push(full.data[i+1]);bs.push(full.data[i+2]); }
+      if(sx+sw+dp-1<W){ const i=(py*stride+(sx+sw+dp-1))*4; rs.push(full.data[i]);gs.push(full.data[i+1]);bs.push(full.data[i+2]); }
+    }
+  }
 
-      // 4 anchors: pixel just outside each edge, same column/row as current pixel
-      const topI  =(Math.max(0,sy-1)*stride + Math.min(W-1,px))*4;
-      const botI  =(Math.min(H-1,sy+sh)*stride + Math.min(W-1,px))*4;
-      const leftI =(Math.min(H-1,py)*stride + Math.max(0,sx-1))*4;
-      const rightI=(Math.min(H-1,py)*stride + Math.min(W-1,sx+sw))*4;
+  const mean=a=>a.reduce((s,v)=>s+v,0)/a.length;
+  const variance=a=>{ const m=mean(a); return a.reduce((s,v)=>s+(v-m)**2,0)/a.length; };
+  const totalVar=variance(rs)+variance(gs)+variance(bs);
 
-      const idx=(py*stride+px)*4;
-      for(let c=0;c<3;c++){
-        // bilinear blend: vertical pair weighted by ty, horizontal pair by tx
-        const vert=full.data[topI+c]*(1-ty)+full.data[botI+c]*ty;
-        const horiz=full.data[leftI+c]*(1-tx)+full.data[rightI+c]*tx;
-        full.data[idx+c]=Math.round((vert+horiz)/2);
+  if(totalVar<400){
+    // solid / near-solid background → fill with exact sampled color
+    const avgR=Math.round(mean(rs)), avgG=Math.round(mean(gs)), avgB=Math.round(mean(bs));
+    for(let py=sy;py<sy+sh;py++){
+      for(let px=sx;px<sx+sw;px++){
+        const idx=(py*stride+px)*4;
+        full.data[idx]=avgR; full.data[idx+1]=avgG; full.data[idx+2]=avgB; full.data[idx+3]=255;
       }
-      full.data[idx+3]=255;
+    }
+  } else {
+    // gradient/textured background → 4-edge bilinear, anchoring PAD px outside
+    const M=PAD;
+    for(let py=sy;py<sy+sh;py++){
+      for(let px=sx;px<sx+sw;px++){
+        const tx=sw>1?(px-sx)/(sw-1):0.5;
+        const ty=sh>1?(py-sy)/(sh-1):0.5;
+        const topI  =(Math.max(0,sy-M)*stride+Math.min(W-1,px))*4;
+        const botI  =(Math.min(H-1,sy+sh+M-1)*stride+Math.min(W-1,px))*4;
+        const leftI =(Math.min(H-1,py)*stride+Math.max(0,sx-M))*4;
+        const rightI=(Math.min(H-1,py)*stride+Math.min(W-1,sx+sw+M-1))*4;
+        const idx=(py*stride+px)*4;
+        for(let c=0;c<3;c++){
+          const vert =full.data[topI+c]*(1-ty)+full.data[botI+c]*ty;
+          const horiz=full.data[leftI+c]*(1-tx)+full.data[rightI+c]*tx;
+          full.data[idx+c]=Math.round((vert+horiz)/2);
+        }
+        full.data[idx+3]=255;
+      }
     }
   }
   ctx.putImageData(full,0,0);
