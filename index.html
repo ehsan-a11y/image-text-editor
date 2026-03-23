@@ -281,83 +281,88 @@ canvas.addEventListener('click',function(e){
   redraw();
 });
 
-/* ─── background sampler: uses border OUTSIDE bbox for clean fill ─── */
-function sampleBackground(imageData, canvasW, sx, sy, sw, sh){
-  const pad=Math.max(4, Math.round(Math.min(sw,sh)*0.2));
-  const x1=Math.max(0,sx-pad), y1=Math.max(0,sy-pad);
-  const x2=Math.min(canvasW,sx+sw+pad);
+/* ─── detect text color from inside bbox (pixels contrasting with outside bg) ─── */
+function detectTextColor(imageData, sx, sy, sw, sh){
   const stride=imageData.width;
+  const W=imageData.width, H=imageData.height;
 
-  let rS=0,gS=0,bS=0,cnt=0;
-  const addPx=(px,py)=>{
-    const idx=(py*stride+px)*4;
-    rS+=imageData.data[idx]; gS+=imageData.data[idx+1]; bS+=imageData.data[idx+2]; cnt++;
+  // sample a thin 2px ring OUTSIDE the bbox for the true background color
+  let rB=0,gB=0,bB=0,cntB=0;
+  const sampleOuter=(px,py)=>{
+    if(px<0||py<0||px>=W||py>=H) return;
+    const i=(py*stride+px)*4;
+    rB+=imageData.data[i]; gB+=imageData.data[i+1]; bB+=imageData.data[i+2]; cntB++;
   };
-  // top strip
-  for(let py=y1;py<sy;py++) for(let px=x1;px<x2;px++) addPx(px,py);
-  // bottom strip
-  const by2=Math.min(imageData.height,sy+sh+pad);
-  for(let py=sy+sh;py<by2;py++) for(let px=x1;px<x2;px++) addPx(px,py);
-  // left strip (excluding corners already counted)
-  for(let py=sy;py<sy+sh;py++) for(let px=x1;px<sx;px++) addPx(px,py);
-  // right strip
-  const rx2=Math.min(imageData.width,sx+sw+pad);
-  for(let py=sy;py<sy+sh;py++) for(let px=sx+sw;px<rx2;px++) addPx(px,py);
+  for(let px=sx-2;px<sx+sw+2;px++){ sampleOuter(px,sy-1); sampleOuter(px,sy-2);
+                                      sampleOuter(px,sy+sh); sampleOuter(px,sy+sh+1); }
+  for(let py=sy;py<sy+sh;py++){      sampleOuter(sx-1,py); sampleOuter(sx-2,py);
+                                      sampleOuter(sx+sw,py); sampleOuter(sx+sw+1,py); }
+  const bg=cntB?{r:rB/cntB,g:gB/cntB,b:bB/cntB}:{r:255,g:255,b:255};
 
-  if(!cnt) return {r:255,g:255,b:255};
-  return {r:Math.round(rS/cnt), g:Math.round(gS/cnt), b:Math.round(bS/cnt)};
-}
-
-/* ─── detect text color: pixels inside bbox most different from background ─── */
-function detectTextColor(imageData, sx, sy, sw, sh, bg){
-  const stride=imageData.width;
-  let rS=0,gS=0,bS=0,cnt=0;
+  // pixels inside bbox that differ most from bg = text pixels
+  let rT=0,gT=0,bT=0,cntT=0, textPx=0, totalPx=sw*sh;
   for(let py=sy;py<sy+sh;py++){
     for(let px=sx;px<sx+sw;px++){
-      const idx=(py*stride+px)*4;
-      const dr=Math.abs(imageData.data[idx]-bg.r);
-      const dg=Math.abs(imageData.data[idx+1]-bg.g);
-      const db=Math.abs(imageData.data[idx+2]-bg.b);
-      if(dr+dg+db>60){
-        rS+=imageData.data[idx]; gS+=imageData.data[idx+1]; bS+=imageData.data[idx+2]; cnt++;
+      const i=(py*stride+px)*4;
+      const diff=Math.abs(imageData.data[i]-bg.r)+
+                 Math.abs(imageData.data[i+1]-bg.g)+
+                 Math.abs(imageData.data[i+2]-bg.b);
+      if(diff>50){
+        rT+=imageData.data[i]; gT+=imageData.data[i+1]; bT+=imageData.data[i+2]; cntT++;
+        textPx++;
       }
     }
   }
-  if(!cnt){
-    const bright=(bg.r*299+bg.g*587+bg.b*114)/1000;
-    return bright>128?{r:0,g:0,b:0}:{r:255,g:255,b:255};
-  }
-  return {r:Math.round(rS/cnt), g:Math.round(gS/cnt), b:Math.round(bS/cnt)};
+  const textColor=cntT
+    ?{r:Math.round(rT/cntT),g:Math.round(gT/cntT),b:Math.round(bT/cntT)}
+    :((bg.r*299+bg.g*587+bg.b*114)/1000>128?{r:0,g:0,b:0}:{r:255,g:255,b:255});
+
+  // bold: if text pixels occupy >28% of bbox area, it's likely bold/heavy
+  const isBold=(totalPx>0)&&(textPx/totalPx>0.28);
+  return {color:textColor, bg, isBold};
 }
 
-/* ─── smart fill: row-by-row interpolation of left/right edge for gradient bg ─── */
-function smartFill(sx, sy, sw, sh){
-  // get full canvas pixels
+/* ─── 4-edge bilinear inpainting — seamless bg reconstruction ─── */
+function bilinearInpaint(sx, sy, sw, sh){
   const full=ctx.getImageData(0,0,canvas.width,canvas.height);
-  const stride=canvas.width;
-  const sx2=sx+sw, sy2=sy+sh;
+  const stride=canvas.width, W=canvas.width, H=canvas.height;
 
-  // for each row in the region, sample leftmost and rightmost outside pixel
-  for(let py=sy;py<sy2;py++){
-    // left anchor
-    const lx=Math.max(0,sx-1);
-    const li=(py*stride+lx)*4;
-    const lr=full.data[li], lg=full.data[li+1], lb=full.data[li+2];
-    // right anchor
-    const rx=Math.min(canvas.width-1,sx2);
-    const ri=(py*stride+rx)*4;
-    const rr=full.data[ri], rg=full.data[ri+1], rb=full.data[ri+2];
+  for(let py=sy;py<sy+sh;py++){
+    for(let px=sx;px<sx+sw;px++){
+      const tx=sw>1?(px-sx)/(sw-1):0.5;
+      const ty=sh>1?(py-sy)/(sh-1):0.5;
 
-    for(let px=sx;px<sx2;px++){
-      const t=(sw>1)?(px-sx)/(sw-1):0;
+      // 4 anchors: pixel just outside each edge, same column/row as current pixel
+      const topI  =(Math.max(0,sy-1)*stride + Math.min(W-1,px))*4;
+      const botI  =(Math.min(H-1,sy+sh)*stride + Math.min(W-1,px))*4;
+      const leftI =(Math.min(H-1,py)*stride + Math.max(0,sx-1))*4;
+      const rightI=(Math.min(H-1,py)*stride + Math.min(W-1,sx+sw))*4;
+
       const idx=(py*stride+px)*4;
-      full.data[idx]  =Math.round(lr+(rr-lr)*t);
-      full.data[idx+1]=Math.round(lg+(rg-lg)*t);
-      full.data[idx+2]=Math.round(lb+(rb-lb)*t);
+      for(let c=0;c<3;c++){
+        // bilinear blend: vertical pair weighted by ty, horizontal pair by tx
+        const vert=full.data[topI+c]*(1-ty)+full.data[botI+c]*ty;
+        const horiz=full.data[leftI+c]*(1-tx)+full.data[rightI+c]*tx;
+        full.data[idx+c]=Math.round((vert+horiz)/2);
+      }
       full.data[idx+3]=255;
     }
   }
   ctx.putImageData(full,0,0);
+}
+
+/* ─── calibrate font size so rendered glyph height matches original bbox height ─── */
+function calibrateFontSize(text, targetH, weight){
+  let fs=targetH*1.2;
+  const spec=w=>`${w} ${fs}px Arial, Helvetica, sans-serif`;
+  ctx.font=spec(weight);
+  const m=ctx.measureText(text);
+  // actualBoundingBoxAscent/Descent give true pixel height of glyphs
+  const asc=m.actualBoundingBoxAscent||fs*0.72;
+  const dsc=m.actualBoundingBoxDescent||fs*0.1;
+  const actualH=asc+dsc;
+  if(actualH>0) fs=fs*(targetH/actualH);
+  return Math.max(6, fs);
 }
 
 /* ─── apply edit ─── */
@@ -366,7 +371,6 @@ document.getElementById('applyBtn').addEventListener('click',function(){
   const newTxt=document.getElementById('newText').value;
   if(!newTxt.trim()) return;
 
-  // save state for undo
   historyStack.push({dataURL:canvas.toDataURL(), regions:JSON.parse(JSON.stringify(regions))});
 
   const r=regions[selectedIdx];
@@ -374,54 +378,40 @@ document.getElementById('applyBtn').addEventListener('click',function(){
   const sx=Math.round(x*scale), sy=Math.round(y*scale);
   const sw=Math.round(w*scale), sh=Math.round(h*scale);
 
-  // 1. grab pixel data BEFORE any changes
+  // 1. analyse BEFORE any changes
   const fullData=ctx.getImageData(0,0,canvas.width,canvas.height);
-  const bg=sampleBackground(fullData, canvas.width, sx, sy, sw, sh);
-  const tc=detectTextColor(fullData, sx, sy, sw, sh, bg);
+  const {color:tc, bg, isBold}=detectTextColor(fullData, sx, sy, sw, sh);
 
-  // 2. smart fill (gradient interpolation) to erase original text
-  smartFill(sx, sy, sw, sh);
+  // 2. erase original text with seamless 4-edge bilinear inpainting
+  bilinearInpaint(sx, sy, sw, sh);
 
-  // 3. determine font size from original bbox height (Tesseract gives tight bbox)
-  //    font-size ≈ bboxHeight in canvas pixels (bbox already includes ascenders/descenders)
-  const fontSize=Math.max(8, sh * 0.88);
+  // 3. calibrate font size so rendered glyph height = original bbox height
+  const weight=isBold?'bold':'normal';
+  let fs=calibrateFontSize(newTxt, sh, weight);
+  const fontSpec=`${weight} ${fs}px Arial, Helvetica, sans-serif`;
 
-  // 4. draw new text
-  ctx.save();
-  ctx.textBaseline='middle';
-  ctx.fillStyle=`rgb(${tc.r},${tc.g},${tc.b})`;
-
-  // try bold first (same weight as most image text), then normal
-  let fs=fontSize;
-  ctx.font=`bold ${fs}px Arial`;
-  while(ctx.measureText(newTxt).width > sw-2 && fs>6){
+  // 4. scale down only if text is wider than bbox (never upscale width)
+  ctx.font=fontSpec;
+  while(ctx.measureText(newTxt).width > sw && fs > 6){
     fs-=0.5;
-    ctx.font=`bold ${fs}px Arial`;
-  }
-  // if still overflows with bold try normal weight
-  if(ctx.measureText(newTxt).width > sw-2){
-    ctx.font=`${fs}px Arial`;
-    while(ctx.measureText(newTxt).width > sw-2 && fs>6){
-      fs-=0.5;
-      ctx.font=`${fs}px Arial`;
-    }
+    ctx.font=`${weight} ${fs}px Arial, Helvetica, sans-serif`;
   }
 
-  // left-align at region start, vertically centred
+  // 5. draw new text — left-aligned at original x, baseline matches original vertical centre
+  ctx.save();
+  ctx.font=`${weight} ${fs}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle=`rgb(${tc.r},${tc.g},${tc.b})`;
+  ctx.textBaseline='middle';
   ctx.fillText(newTxt, sx, sy+sh/2);
   ctx.restore();
 
-  // 5. mark edited — bake canvas into imgEl so redraw keeps the edits
+  // 6. bake result into imgEl; mark region edited (no overlay drawn)
   regions[selectedIdx].edited=true;
   regions[selectedIdx].text=newTxt;
 
   const snap=canvas.toDataURL();
   const img=new Image();
-  img.onload=()=>{
-    imgEl=img;
-    redraw();           // redraws from updated imgEl; edited region has no box
-    renderList();
-  };
+  img.onload=()=>{ imgEl=img; redraw(); renderList(); };
   img.src=snap;
 
   document.getElementById('editBox').style.display='none';
