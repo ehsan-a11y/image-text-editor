@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Text Editor</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',sans-serif;background:#0f0f1a;color:#eee;min-height:100vh}
+  .header{background:linear-gradient(135deg,#16213e,#0f3460);padding:18px 30px;display:flex;align-items:center;gap:12px;border-bottom:2px solid #e94560}
+  .header h1{font-size:1.5rem;color:#e94560}
+  .header p{color:#aaa;font-size:0.82rem;margin-top:2px}
+  .container{display:flex;height:calc(100vh - 72px)}
+  .sidebar{width:300px;background:#13132a;padding:18px;overflow-y:auto;border-right:1px solid #1e1e3a;flex-shrink:0;display:flex;flex-direction:column;gap:10px}
+  .main{flex:1;padding:20px;overflow:auto;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+  .upload-area{border:2px dashed #e94560;border-radius:12px;padding:30px 15px;text-align:center;cursor:pointer;transition:.3s}
+  .upload-area:hover{background:#1a1a3a}
+  .upload-area input{display:none}
+  .btn{background:#e94560;color:#fff;border:none;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:.88rem;transition:.2s;width:100%}
+  .btn:hover{background:#c73652}
+  .btn:disabled{background:#444;cursor:not-allowed}
+  .btn-outline{background:transparent;border:1px solid #e94560;color:#e94560}
+  .btn-outline:hover{background:#1a1a3a}
+  .status{padding:9px 13px;border-radius:8px;font-size:.82rem;display:none}
+  .status.info{background:#0d2a4a;border:1px solid #4a90d9;color:#4a90d9}
+  .status.success{background:#0a2a1a;border:1px solid #4caf50;color:#4caf50}
+  .status.error{background:#2a0a0a;border:1px solid #e94560;color:#e94560}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:5px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .section-label{font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:#666;margin-top:4px}
+  .text-item{background:#1a1a3a;border:1.5px solid #2a2a5a;border-radius:8px;padding:10px 12px;cursor:pointer;transition:.2s}
+  .text-item:hover{border-color:#e94560}
+  .text-item.active{border-color:#e94560;background:#20203a}
+  .text-item .label{font-size:.72rem;color:#888;margin-bottom:3px}
+  .text-item .word{font-size:.92rem;font-weight:600}
+  .edit-box{background:#1a1a3a;border-radius:10px;padding:14px;display:none}
+  .edit-box h3{color:#e94560;font-size:.88rem;margin-bottom:10px}
+  .edit-box input{width:100%;background:#0f0f1a;border:1px solid #e94560;color:#fff;padding:8px 11px;border-radius:6px;font-size:.9rem;margin-bottom:8px;outline:none}
+  .edit-box input:focus{border-color:#ff6b8a}
+  .canvas-wrap{position:relative;display:inline-block;border:2px solid #1e1e3a;border-radius:8px;overflow:hidden}
+  canvas{display:block;max-width:100%}
+  .placeholder{text-align:center;margin-top:80px;color:#444}
+  .placeholder svg{opacity:.3}
+  .placeholder p{margin-top:14px;font-size:.95rem;color:#555}
+  .progress-bar{width:100%;height:4px;background:#1a1a3a;border-radius:2px;overflow:hidden;display:none}
+  .progress-fill{height:100%;background:#e94560;transition:width .3s;width:0%}
+  .badge{display:inline-block;background:#e94560;color:#fff;font-size:.65rem;padding:1px 6px;border-radius:10px;margin-left:5px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>✏️ Image Text Editor</h1>
+    <p>Detect &amp; edit text in any image — powered by Tesseract.js</p>
+  </div>
+</div>
+<div class="container">
+  <div class="sidebar">
+    <div id="status" class="status"></div>
+
+    <label class="upload-area" for="fileInput">
+      <svg width="36" height="36" fill="none" stroke="#e94560" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4-4 4 4 4-6 4 6M4 20h16M4 4h16v12H4z"/></svg>
+      <div style="color:#e94560;font-weight:600;margin-top:8px">Upload Image</div>
+      <div style="color:#888;font-size:.78rem;margin-top:3px">PNG · JPG · WEBP</div>
+      <input type="file" id="fileInput" accept="image/*">
+    </label>
+
+    <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+
+    <button class="btn" id="detectBtn" disabled>Detect Text</button>
+
+    <div class="section-label" id="regionsLabel" style="display:none">Detected Regions <span class="badge" id="regionCount">0</span></div>
+    <div id="textList" style="display:flex;flex-direction:column;gap:6px"></div>
+
+    <div class="edit-box" id="editBox">
+      <h3>Edit Text</h3>
+      <div style="color:#888;font-size:.78rem;margin-bottom:6px">Original: <strong id="origDisplay" style="color:#ccc"></strong></div>
+      <input type="text" id="newText" placeholder="Type replacement text...">
+      <button class="btn" id="applyBtn">Apply</button>
+      <button class="btn btn-outline" id="undoBtn" style="margin-top:6px">Undo Last Edit</button>
+    </div>
+
+    <div id="downloadWrap" style="display:none">
+      <div class="section-label">Export</div>
+      <button class="btn btn-outline" id="downloadBtn">⬇ Download Image</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div id="canvasWrap" class="canvas-wrap" style="display:none">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="placeholder" id="placeholder">
+      <svg width="72" height="72" fill="none" stroke="#555" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4 16l4-4 4 4 4-6 4 6M4 20h16M4 4h16v12H4z"/></svg>
+      <p>Upload an image to get started</p>
+      <p style="margin-top:6px;font-size:.82rem;color:#444">Then click Detect Text to find editable regions</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let imgEl = null;
+let originalDataURL = null;
+let historyStack = [];
+let regions = [];
+let selectedIdx = -1;
+let scale = 1;
+
+function showStatus(msg, type='info') {
+  const el = document.getElementById('status');
+  el.innerHTML = msg;
+  el.className = 'status ' + type;
+  el.style.display = 'block';
+}
+function hideStatus() { document.getElementById('status').style.display = 'none'; }
+function setProgress(p) {
+  const bar = document.getElementById('progressBar');
+  const fill = document.getElementById('progressFill');
+  if (p <= 0) { bar.style.display='none'; return; }
+  bar.style.display='block';
+  fill.style.width = p + '%';
+}
+
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    loadImage(ev.target.result);
+    originalDataURL = ev.target.result;
+    historyStack = [];
+    regions = [];
+    selectedIdx = -1;
+    document.getElementById('textList').innerHTML = '';
+    document.getElementById('editBox').style.display = 'none';
+    document.getElementById('regionsLabel').style.display = 'none';
+    document.getElementById('downloadWrap').style.display = 'none';
+    document.getElementById('detectBtn').disabled = false;
+    hideStatus();
+  };
+  reader.readAsDataURL(file);
+});
+
+function loadImage(src, callback) {
+  const img = new Image();
+  img.onload = () => {
+    imgEl = img;
+    const maxW = document.querySelector('.main').clientWidth - 40;
+    const maxH = window.innerHeight - 130;
+    scale = Math.min(maxW / img.width, maxH / img.height, 1);
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    document.getElementById('canvasWrap').style.display = 'inline-block';
+    document.getElementById('placeholder').style.display = 'none';
+    drawOverlays();
+    if (callback) callback();
+  };
+  img.src = src;
+}
+
+function drawOverlays() {
+  if (!imgEl) return;
+  ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
+  regions.forEach((r, i) => {
+    const {x, y, w, h} = r.bbox;
+    ctx.strokeStyle = i === selectedIdx ? '#e94560' : '#4a90d9';
+    ctx.lineWidth = i === selectedIdx ? 2.5 : 1.5;
+    ctx.strokeRect(x * scale, y * scale, w * scale, h * scale);
+    if (i === selectedIdx) {
+      ctx.fillStyle = 'rgba(233,69,96,0.15)';
+      ctx.fillRect(x * scale, y * scale, w * scale, h * scale);
+    }
+  });
+}
+
+document.getElementById('detectBtn').addEventListener('click', async function() {
+  if (!imgEl) return;
+  this.disabled = true;
+  this.innerHTML = '<span class="spinner"></span>Detecting...';
+  showStatus('<span class="spinner"></span>Running OCR...', 'info');
+  setProgress(10);
+
+  try {
+    const worker = await Tesseract.createWorker('eng', 1, {
+      logger: m => {
+        if (m.status === 'recognizing text') setProgress(10 + m.progress * 85);
+      }
+    });
+
+    const { data } = await worker.recognize(canvas.toDataURL());
+    await worker.terminate();
+    setProgress(100);
+
+    regions = [];
+    data.words.forEach(word => {
+      if (word.confidence > 30 && word.text.trim().length > 0) {
+        regions.push({
+          text: word.text.trim(),
+          confidence: word.confidence,
+          bbox: {
+            x: Math.round(word.bbox.x0 / scale),
+            y: Math.round(word.bbox.y0 / scale),
+            w: Math.round((word.bbox.x1 - word.bbox.x0) / scale),
+            h: Math.round((word.bbox.y1 - word.bbox.y0) / scale)
+          }
+        });
+      }
+    });
+
+    renderList();
+    document.getElementById('regionCount').textContent = regions.length;
+    document.getElementById('regionsLabel').style.display = regions.length ? 'block' : 'none';
+    document.getElementById('downloadWrap').style.display = regions.length ? 'block' : 'none';
+    showStatus(`Found ${regions.length} text region(s)`, 'success');
+    setProgress(0);
+  } catch(e) {
+    showStatus('OCR failed: ' + e.message, 'error');
+    setProgress(0);
+  }
+
+  this.disabled = false;
+  this.textContent = 'Re-detect Text';
+});
+
+function renderList() {
+  const list = document.getElementById('textList');
+  list.innerHTML = '';
+  regions.forEach((r, i) => {
+    const div = document.createElement('div');
+    div.className = 'text-item' + (i === selectedIdx ? ' active' : '');
+    div.innerHTML = `<div class="label">Region ${i+1} · ${r.confidence.toFixed(0)}% confidence</div><div class="word">${r.text}</div>`;
+    div.onclick = () => selectRegion(i);
+    list.appendChild(div);
+  });
+  drawOverlays();
+}
+
+function selectRegion(i) {
+  selectedIdx = i;
+  document.getElementById('origDisplay').textContent = regions[i].text;
+  document.getElementById('newText').value = regions[i].text;
+  document.getElementById('editBox').style.display = 'block';
+  renderList();
+  document.getElementById('newText').focus();
+}
+
+canvas.addEventListener('click', function(e) {
+  if (!regions.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) / scale;
+  const my = (e.clientY - rect.top) / scale;
+  for (let i = 0; i < regions.length; i++) {
+    const {x, y, w, h} = regions[i].bbox;
+    if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
+      selectRegion(i);
+      return;
+    }
+  }
+});
+
+document.getElementById('applyBtn').addEventListener('click', function() {
+  if (selectedIdx < 0) return;
+  const newText = document.getElementById('newText').value.trim();
+  if (!newText) return;
+
+  // Save current state for undo
+  historyStack.push(canvas.toDataURL());
+
+  const r = regions[selectedIdx];
+  const {x, y, w, h} = r.bbox;
+  const sx = x * scale, sy = y * scale, sw = w * scale, sh = h * scale;
+
+  // Sample background color from region edges
+  const edgeData = ctx.getImageData(sx, sy, sw, Math.min(sh, 3));
+  let rSum=0, gSum=0, bSum=0, cnt=edgeData.data.length/4;
+  for (let i=0;i<edgeData.data.length;i+=4){rSum+=edgeData.data[i];gSum+=edgeData.data[i+1];bSum+=edgeData.data[i+2];}
+  const bgR=Math.round(rSum/cnt), bgG=Math.round(gSum/cnt), bgB=Math.round(bSum/cnt);
+  const bright = (bgR*299 + bgG*587 + bgB*114)/1000;
+  const textColor = bright > 128 ? '#000' : '#fff';
+
+  // Fill background
+  ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
+  ctx.fillRect(sx, sy, sw, sh);
+
+  // Draw new text fitted in box
+  let fontSize = sh * 0.85;
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = textColor;
+  do {
+    ctx.font = `bold ${fontSize}px Arial`;
+    fontSize -= 1;
+  } while (ctx.measureText(newText).width > sw - 4 && fontSize > 6);
+
+  ctx.fillText(newText, sx + 2, sy + sh/2, sw - 4);
+
+  // Update region text and reload imgEl from canvas for future redraws
+  regions[selectedIdx].text = newText;
+  const dataURL = canvas.toDataURL();
+  const img = new Image();
+  img.onload = () => { imgEl = img; renderList(); };
+  img.src = dataURL;
+
+  document.getElementById('origDisplay').textContent = newText;
+  showStatus('Text updated!', 'success');
+});
+
+document.getElementById('undoBtn').addEventListener('click', function() {
+  if (!historyStack.length) return;
+  const prev = historyStack.pop();
+  loadImage(prev, () => { showStatus('Undone', 'info'); });
+});
+
+document.getElementById('downloadBtn').addEventListener('click', function() {
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');
+  a.download = 'edited_image.png';
+  a.click();
+});
+
+document.getElementById('newText').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('applyBtn').click();
+});
+</script>
+</body>
+</html>
