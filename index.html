@@ -34,12 +34,14 @@
   .text-item.active{border-color:#e94560;background:#20203a}
   .text-item .label{font-size:.72rem;color:#888;margin-bottom:3px}
   .text-item .word{font-size:.92rem;font-weight:600}
+  .text-item.done .word{color:#888;text-decoration:line-through}
   .edit-box{background:#1a1a3a;border-radius:10px;padding:14px;display:none}
   .edit-box h3{color:#e94560;font-size:.88rem;margin-bottom:10px}
   .edit-box input{width:100%;background:#0f0f1a;border:1px solid #e94560;color:#fff;padding:8px 11px;border-radius:6px;font-size:.9rem;margin-bottom:8px;outline:none}
   .edit-box input:focus{border-color:#ff6b8a}
   .canvas-wrap{position:relative;display:inline-block;border:2px solid #1e1e3a;border-radius:8px;overflow:hidden}
-  canvas{display:block;max-width:100%}
+  canvas{display:block;max-width:100%;cursor:default}
+  canvas.hoverable{cursor:pointer}
   .placeholder{text-align:center;margin-top:80px;color:#444}
   .placeholder svg{opacity:.3}
   .placeholder p{margin-top:14px;font-size:.95rem;color:#555}
@@ -52,7 +54,7 @@
 <div class="header">
   <div>
     <h1>✏️ Image Text Editor</h1>
-    <p>Detect &amp; edit text in any image — powered by Tesseract.js</p>
+    <p>Detect &amp; edit text in any image — PhoText style</p>
   </div>
 </div>
 <div class="container">
@@ -67,18 +69,21 @@
     </label>
 
     <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
-
     <button class="btn" id="detectBtn" disabled>Detect Text</button>
 
-    <div class="section-label" id="regionsLabel" style="display:none">Detected Regions <span class="badge" id="regionCount">0</span></div>
+    <div class="section-label" id="regionsLabel" style="display:none">
+      Detected Regions <span class="badge" id="regionCount">0</span>
+    </div>
     <div id="textList" style="display:flex;flex-direction:column;gap:6px"></div>
 
     <div class="edit-box" id="editBox">
       <h3>Edit Text</h3>
-      <div style="color:#888;font-size:.78rem;margin-bottom:6px">Original: <strong id="origDisplay" style="color:#ccc"></strong></div>
+      <div style="color:#888;font-size:.78rem;margin-bottom:6px">
+        Original: <strong id="origDisplay" style="color:#ccc"></strong>
+      </div>
       <input type="text" id="newText" placeholder="Type replacement text...">
       <button class="btn" id="applyBtn">Apply</button>
-      <button class="btn btn-outline" id="undoBtn" style="margin-top:6px">Undo Last Edit</button>
+      <button class="btn btn-outline" id="undoBtn" style="margin-top:6px">Undo</button>
     </div>
 
     <div id="downloadWrap" style="display:none">
@@ -92,7 +97,9 @@
       <canvas id="canvas"></canvas>
     </div>
     <div class="placeholder" id="placeholder">
-      <svg width="72" height="72" fill="none" stroke="#555" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4 16l4-4 4 4 4-6 4 6M4 20h16M4 4h16v12H4z"/></svg>
+      <svg width="72" height="72" fill="none" stroke="#555" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M4 16l4-4 4 4 4-6 4 6M4 20h16M4 4h16v12H4z"/>
+      </svg>
       <p>Upload an image to get started</p>
       <p style="margin-top:6px;font-size:.82rem;color:#444">Then click Detect Text to find editable regions</p>
     </div>
@@ -104,225 +111,349 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 let imgEl = null;
 let originalDataURL = null;
-let historyStack = [];
+let historyStack = [];   // stack of DataURLs for undo
 let regions = [];
 let selectedIdx = -1;
 let scale = 1;
 
-function showStatus(msg, type='info') {
-  const el = document.getElementById('status');
-  el.innerHTML = msg;
-  el.className = 'status ' + type;
-  el.style.display = 'block';
+/* ─── helpers ─── */
+function showStatus(msg, type='info'){
+  const el=document.getElementById('status');
+  el.innerHTML=msg; el.className='status '+type; el.style.display='block';
 }
-function hideStatus() { document.getElementById('status').style.display = 'none'; }
-function setProgress(p) {
-  const bar = document.getElementById('progressBar');
-  const fill = document.getElementById('progressFill');
-  if (p <= 0) { bar.style.display='none'; return; }
-  bar.style.display='block';
-  fill.style.width = p + '%';
+function hideStatus(){ document.getElementById('status').style.display='none'; }
+function setProgress(p){
+  const bar=document.getElementById('progressBar'), fill=document.getElementById('progressFill');
+  if(p<=0){bar.style.display='none';return;}
+  bar.style.display='block'; fill.style.width=p+'%';
 }
 
-document.getElementById('fileInput').addEventListener('change', function(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    loadImage(ev.target.result);
-    originalDataURL = ev.target.result;
-    historyStack = [];
-    regions = [];
-    selectedIdx = -1;
-    document.getElementById('textList').innerHTML = '';
-    document.getElementById('editBox').style.display = 'none';
-    document.getElementById('regionsLabel').style.display = 'none';
-    document.getElementById('downloadWrap').style.display = 'none';
-    document.getElementById('detectBtn').disabled = false;
-    hideStatus();
+/* ─── load image onto canvas ─── */
+function loadImage(src, cb){
+  const img=new Image();
+  img.onload=()=>{
+    imgEl=img;
+    const maxW=document.querySelector('.main').clientWidth-40;
+    const maxH=window.innerHeight-130;
+    scale=Math.min(maxW/img.width, maxH/img.height, 1);
+    canvas.width=img.width*scale;
+    canvas.height=img.height*scale;
+    ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    document.getElementById('canvasWrap').style.display='inline-block';
+    document.getElementById('placeholder').style.display='none';
+    redraw();
+    if(cb) cb();
   };
-  reader.readAsDataURL(file);
-});
-
-function loadImage(src, callback) {
-  const img = new Image();
-  img.onload = () => {
-    imgEl = img;
-    const maxW = document.querySelector('.main').clientWidth - 40;
-    const maxH = window.innerHeight - 130;
-    scale = Math.min(maxW / img.width, maxH / img.height, 1);
-    canvas.width = img.width * scale;
-    canvas.height = img.height * scale;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    document.getElementById('canvasWrap').style.display = 'inline-block';
-    document.getElementById('placeholder').style.display = 'none';
-    drawOverlays();
-    if (callback) callback();
-  };
-  img.src = src;
+  img.src=src;
 }
 
-function drawOverlays() {
-  if (!imgEl) return;
-  ctx.drawImage(imgEl, 0, 0, canvas.width, canvas.height);
-  regions.forEach((r, i) => {
-    const {x, y, w, h} = r.bbox;
-    ctx.strokeStyle = i === selectedIdx ? '#e94560' : '#4a90d9';
-    ctx.lineWidth = i === selectedIdx ? 2.5 : 1.5;
-    ctx.strokeRect(x * scale, y * scale, w * scale, h * scale);
-    if (i === selectedIdx) {
-      ctx.fillStyle = 'rgba(233,69,96,0.15)';
-      ctx.fillRect(x * scale, y * scale, w * scale, h * scale);
+/* ─── redraw: image + subtle boxes only for unedited, selected highlight ─── */
+function redraw(){
+  if(!imgEl) return;
+  ctx.drawImage(imgEl,0,0,canvas.width,canvas.height);
+  regions.forEach((r,i)=>{
+    if(r.edited) return;                            // edited → no box at all
+    const {x,y,w,h}=r.bbox;
+    const sx=x*scale, sy=y*scale, sw=w*scale, sh=h*scale;
+    if(i===selectedIdx){
+      // active selection: coloured fill + border
+      ctx.fillStyle='rgba(233,69,96,0.18)';
+      ctx.fillRect(sx,sy,sw,sh);
+      ctx.strokeStyle='#e94560';
+      ctx.lineWidth=2;
+      ctx.strokeRect(sx,sy,sw,sh);
+    } else {
+      // unselected: faint dashed outline only
+      ctx.setLineDash([3,3]);
+      ctx.strokeStyle='rgba(74,144,217,0.5)';
+      ctx.lineWidth=1;
+      ctx.strokeRect(sx,sy,sw,sh);
+      ctx.setLineDash([]);
     }
   });
+  canvas.classList.toggle('hoverable', regions.some(r=>!r.edited));
 }
 
-document.getElementById('detectBtn').addEventListener('click', async function() {
-  if (!imgEl) return;
-  this.disabled = true;
-  this.innerHTML = '<span class="spinner"></span>Detecting...';
-  showStatus('<span class="spinner"></span>Running OCR...', 'info');
+/* ─── file upload ─── */
+document.getElementById('fileInput').addEventListener('change',function(e){
+  const file=e.target.files[0]; if(!file) return;
+  const fr=new FileReader();
+  fr.onload=ev=>{
+    originalDataURL=ev.target.result;
+    historyStack=[];
+    regions=[]; selectedIdx=-1;
+    document.getElementById('textList').innerHTML='';
+    document.getElementById('editBox').style.display='none';
+    document.getElementById('regionsLabel').style.display='none';
+    document.getElementById('downloadWrap').style.display='none';
+    document.getElementById('detectBtn').disabled=false;
+    hideStatus();
+    loadImage(ev.target.result);
+  };
+  fr.readAsDataURL(file);
+});
+
+/* ─── detect text ─── */
+document.getElementById('detectBtn').addEventListener('click', async function(){
+  if(!imgEl) return;
+  this.disabled=true;
+  this.innerHTML='<span class="spinner"></span>Detecting...';
+  showStatus('<span class="spinner"></span>Running OCR…','info');
   setProgress(10);
-
-  try {
-    const worker = await Tesseract.createWorker('eng', 1, {
-      logger: m => {
-        if (m.status === 'recognizing text') setProgress(10 + m.progress * 85);
-      }
+  try{
+    const worker=await Tesseract.createWorker('eng',1,{
+      logger:m=>{ if(m.status==='recognizing text') setProgress(10+m.progress*85); }
     });
-
-    const { data } = await worker.recognize(canvas.toDataURL());
+    // run OCR on original full-res image for best accuracy
+    const {data}=await worker.recognize(originalDataURL||canvas.toDataURL());
     await worker.terminate();
     setProgress(100);
 
-    regions = [];
-    data.words.forEach(word => {
-      if (word.confidence > 30 && word.text.trim().length > 0) {
+    regions=[];
+    data.words.forEach(word=>{
+      if(word.confidence>30 && word.text.trim().length>0){
+        // Tesseract coords are in original image space
         regions.push({
-          text: word.text.trim(),
-          confidence: word.confidence,
-          bbox: {
-            x: Math.round(word.bbox.x0 / scale),
-            y: Math.round(word.bbox.y0 / scale),
-            w: Math.round((word.bbox.x1 - word.bbox.x0) / scale),
-            h: Math.round((word.bbox.y1 - word.bbox.y0) / scale)
+          text:word.text.trim(),
+          confidence:word.confidence,
+          edited:false,
+          bbox:{
+            x:Math.round(word.bbox.x0),
+            y:Math.round(word.bbox.y0),
+            w:Math.round(word.bbox.x1-word.bbox.x0),
+            h:Math.round(word.bbox.y1-word.bbox.y0)
           }
         });
       }
     });
 
     renderList();
-    document.getElementById('regionCount').textContent = regions.length;
-    document.getElementById('regionsLabel').style.display = regions.length ? 'block' : 'none';
-    document.getElementById('downloadWrap').style.display = regions.length ? 'block' : 'none';
-    showStatus(`Found ${regions.length} text region(s)`, 'success');
+    document.getElementById('regionCount').textContent=regions.length;
+    document.getElementById('regionsLabel').style.display=regions.length?'block':'none';
+    document.getElementById('downloadWrap').style.display=regions.length?'block':'none';
+    showStatus(`Found ${regions.length} text region(s)  — click one to edit`,'success');
     setProgress(0);
-  } catch(e) {
-    showStatus('OCR failed: ' + e.message, 'error');
+  }catch(e){
+    showStatus('OCR failed: '+e.message,'error');
     setProgress(0);
   }
-
-  this.disabled = false;
-  this.textContent = 'Re-detect Text';
+  this.disabled=false;
+  this.textContent='Re-detect Text';
 });
 
-function renderList() {
-  const list = document.getElementById('textList');
-  list.innerHTML = '';
-  regions.forEach((r, i) => {
-    const div = document.createElement('div');
-    div.className = 'text-item' + (i === selectedIdx ? ' active' : '');
-    div.innerHTML = `<div class="label">Region ${i+1} · ${r.confidence.toFixed(0)}% confidence</div><div class="word">${r.text}</div>`;
-    div.onclick = () => selectRegion(i);
+/* ─── sidebar list ─── */
+function renderList(){
+  const list=document.getElementById('textList');
+  list.innerHTML='';
+  regions.forEach((r,i)=>{
+    const div=document.createElement('div');
+    div.className='text-item'+(i===selectedIdx?' active':'')+(r.edited?' done':'');
+    div.innerHTML=`<div class="label">Region ${i+1} · ${r.confidence.toFixed(0)}%${r.edited?' · edited':''}</div><div class="word">${r.text}</div>`;
+    div.onclick=()=>selectRegion(i);
     list.appendChild(div);
   });
-  drawOverlays();
+  redraw();
 }
 
-function selectRegion(i) {
-  selectedIdx = i;
-  document.getElementById('origDisplay').textContent = regions[i].text;
-  document.getElementById('newText').value = regions[i].text;
-  document.getElementById('editBox').style.display = 'block';
+function selectRegion(i){
+  selectedIdx=i;
+  const r=regions[i];
+  document.getElementById('origDisplay').textContent=r.text;
+  document.getElementById('newText').value=r.edited?'':r.text;
+  document.getElementById('editBox').style.display='block';
   renderList();
-  document.getElementById('newText').focus();
+  document.getElementById('newText').select();
 }
 
-canvas.addEventListener('click', function(e) {
-  if (!regions.length) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) / scale;
-  const my = (e.clientY - rect.top) / scale;
-  for (let i = 0; i < regions.length; i++) {
-    const {x, y, w, h} = regions[i].bbox;
-    if (mx >= x && mx <= x+w && my >= y && my <= y+h) {
-      selectRegion(i);
-      return;
+/* ─── canvas click → select region ─── */
+canvas.addEventListener('click',function(e){
+  if(!regions.length) return;
+  const rect=canvas.getBoundingClientRect();
+  const mx=(e.clientX-rect.left)/scale;
+  const my=(e.clientY-rect.top)/scale;
+  for(let i=0;i<regions.length;i++){
+    const {x,y,w,h}=regions[i].bbox;
+    if(mx>=x&&mx<=x+w&&my>=y&&my<=y+h){ selectRegion(i); return; }
+  }
+  // click outside → deselect
+  selectedIdx=-1;
+  document.getElementById('editBox').style.display='none';
+  redraw();
+});
+
+/* ─── background sampler: uses border OUTSIDE bbox for clean fill ─── */
+function sampleBackground(imageData, canvasW, sx, sy, sw, sh){
+  const pad=Math.max(4, Math.round(Math.min(sw,sh)*0.2));
+  const x1=Math.max(0,sx-pad), y1=Math.max(0,sy-pad);
+  const x2=Math.min(canvasW,sx+sw+pad);
+  const stride=imageData.width;
+
+  let rS=0,gS=0,bS=0,cnt=0;
+  const addPx=(px,py)=>{
+    const idx=(py*stride+px)*4;
+    rS+=imageData.data[idx]; gS+=imageData.data[idx+1]; bS+=imageData.data[idx+2]; cnt++;
+  };
+  // top strip
+  for(let py=y1;py<sy;py++) for(let px=x1;px<x2;px++) addPx(px,py);
+  // bottom strip
+  const by2=Math.min(imageData.height,sy+sh+pad);
+  for(let py=sy+sh;py<by2;py++) for(let px=x1;px<x2;px++) addPx(px,py);
+  // left strip (excluding corners already counted)
+  for(let py=sy;py<sy+sh;py++) for(let px=x1;px<sx;px++) addPx(px,py);
+  // right strip
+  const rx2=Math.min(imageData.width,sx+sw+pad);
+  for(let py=sy;py<sy+sh;py++) for(let px=sx+sw;px<rx2;px++) addPx(px,py);
+
+  if(!cnt) return {r:255,g:255,b:255};
+  return {r:Math.round(rS/cnt), g:Math.round(gS/cnt), b:Math.round(bS/cnt)};
+}
+
+/* ─── detect text color: pixels inside bbox most different from background ─── */
+function detectTextColor(imageData, sx, sy, sw, sh, bg){
+  const stride=imageData.width;
+  let rS=0,gS=0,bS=0,cnt=0;
+  for(let py=sy;py<sy+sh;py++){
+    for(let px=sx;px<sx+sw;px++){
+      const idx=(py*stride+px)*4;
+      const dr=Math.abs(imageData.data[idx]-bg.r);
+      const dg=Math.abs(imageData.data[idx+1]-bg.g);
+      const db=Math.abs(imageData.data[idx+2]-bg.b);
+      if(dr+dg+db>60){
+        rS+=imageData.data[idx]; gS+=imageData.data[idx+1]; bS+=imageData.data[idx+2]; cnt++;
+      }
     }
   }
+  if(!cnt){
+    const bright=(bg.r*299+bg.g*587+bg.b*114)/1000;
+    return bright>128?{r:0,g:0,b:0}:{r:255,g:255,b:255};
+  }
+  return {r:Math.round(rS/cnt), g:Math.round(gS/cnt), b:Math.round(bS/cnt)};
+}
+
+/* ─── smart fill: row-by-row interpolation of left/right edge for gradient bg ─── */
+function smartFill(sx, sy, sw, sh){
+  // get full canvas pixels
+  const full=ctx.getImageData(0,0,canvas.width,canvas.height);
+  const stride=canvas.width;
+  const sx2=sx+sw, sy2=sy+sh;
+
+  // for each row in the region, sample leftmost and rightmost outside pixel
+  for(let py=sy;py<sy2;py++){
+    // left anchor
+    const lx=Math.max(0,sx-1);
+    const li=(py*stride+lx)*4;
+    const lr=full.data[li], lg=full.data[li+1], lb=full.data[li+2];
+    // right anchor
+    const rx=Math.min(canvas.width-1,sx2);
+    const ri=(py*stride+rx)*4;
+    const rr=full.data[ri], rg=full.data[ri+1], rb=full.data[ri+2];
+
+    for(let px=sx;px<sx2;px++){
+      const t=(sw>1)?(px-sx)/(sw-1):0;
+      const idx=(py*stride+px)*4;
+      full.data[idx]  =Math.round(lr+(rr-lr)*t);
+      full.data[idx+1]=Math.round(lg+(rg-lg)*t);
+      full.data[idx+2]=Math.round(lb+(rb-lb)*t);
+      full.data[idx+3]=255;
+    }
+  }
+  ctx.putImageData(full,0,0);
+}
+
+/* ─── apply edit ─── */
+document.getElementById('applyBtn').addEventListener('click',function(){
+  if(selectedIdx<0) return;
+  const newTxt=document.getElementById('newText').value;
+  if(!newTxt.trim()) return;
+
+  // save state for undo
+  historyStack.push({dataURL:canvas.toDataURL(), regions:JSON.parse(JSON.stringify(regions))});
+
+  const r=regions[selectedIdx];
+  const {x,y,w,h}=r.bbox;
+  const sx=Math.round(x*scale), sy=Math.round(y*scale);
+  const sw=Math.round(w*scale), sh=Math.round(h*scale);
+
+  // 1. grab pixel data BEFORE any changes
+  const fullData=ctx.getImageData(0,0,canvas.width,canvas.height);
+  const bg=sampleBackground(fullData, canvas.width, sx, sy, sw, sh);
+  const tc=detectTextColor(fullData, sx, sy, sw, sh, bg);
+
+  // 2. smart fill (gradient interpolation) to erase original text
+  smartFill(sx, sy, sw, sh);
+
+  // 3. determine font size from original bbox height (Tesseract gives tight bbox)
+  //    font-size ≈ bboxHeight in canvas pixels (bbox already includes ascenders/descenders)
+  const fontSize=Math.max(8, sh * 0.88);
+
+  // 4. draw new text
+  ctx.save();
+  ctx.textBaseline='middle';
+  ctx.fillStyle=`rgb(${tc.r},${tc.g},${tc.b})`;
+
+  // try bold first (same weight as most image text), then normal
+  let fs=fontSize;
+  ctx.font=`bold ${fs}px Arial`;
+  while(ctx.measureText(newTxt).width > sw-2 && fs>6){
+    fs-=0.5;
+    ctx.font=`bold ${fs}px Arial`;
+  }
+  // if still overflows with bold try normal weight
+  if(ctx.measureText(newTxt).width > sw-2){
+    ctx.font=`${fs}px Arial`;
+    while(ctx.measureText(newTxt).width > sw-2 && fs>6){
+      fs-=0.5;
+      ctx.font=`${fs}px Arial`;
+    }
+  }
+
+  // left-align at region start, vertically centred
+  ctx.fillText(newTxt, sx, sy+sh/2);
+  ctx.restore();
+
+  // 5. mark edited — bake canvas into imgEl so redraw keeps the edits
+  regions[selectedIdx].edited=true;
+  regions[selectedIdx].text=newTxt;
+
+  const snap=canvas.toDataURL();
+  const img=new Image();
+  img.onload=()=>{
+    imgEl=img;
+    redraw();           // redraws from updated imgEl; edited region has no box
+    renderList();
+  };
+  img.src=snap;
+
+  document.getElementById('editBox').style.display='none';
+  selectedIdx=-1;
+  showStatus('Text updated!','success');
 });
 
-document.getElementById('applyBtn').addEventListener('click', function() {
-  if (selectedIdx < 0) return;
-  const newText = document.getElementById('newText').value.trim();
-  if (!newText) return;
-
-  // Save current state for undo
-  historyStack.push(canvas.toDataURL());
-
-  const r = regions[selectedIdx];
-  const {x, y, w, h} = r.bbox;
-  const sx = x * scale, sy = y * scale, sw = w * scale, sh = h * scale;
-
-  // Sample background color from region edges
-  const edgeData = ctx.getImageData(sx, sy, sw, Math.min(sh, 3));
-  let rSum=0, gSum=0, bSum=0, cnt=edgeData.data.length/4;
-  for (let i=0;i<edgeData.data.length;i+=4){rSum+=edgeData.data[i];gSum+=edgeData.data[i+1];bSum+=edgeData.data[i+2];}
-  const bgR=Math.round(rSum/cnt), bgG=Math.round(gSum/cnt), bgB=Math.round(bSum/cnt);
-  const bright = (bgR*299 + bgG*587 + bgB*114)/1000;
-  const textColor = bright > 128 ? '#000' : '#fff';
-
-  // Fill background
-  ctx.fillStyle = `rgb(${bgR},${bgG},${bgB})`;
-  ctx.fillRect(sx, sy, sw, sh);
-
-  // Draw new text fitted in box
-  let fontSize = sh * 0.85;
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = textColor;
-  do {
-    ctx.font = `bold ${fontSize}px Arial`;
-    fontSize -= 1;
-  } while (ctx.measureText(newText).width > sw - 4 && fontSize > 6);
-
-  ctx.fillText(newText, sx + 2, sy + sh/2, sw - 4);
-
-  // Update region text and reload imgEl from canvas for future redraws
-  regions[selectedIdx].text = newText;
-  const dataURL = canvas.toDataURL();
-  const img = new Image();
-  img.onload = () => { imgEl = img; renderList(); };
-  img.src = dataURL;
-
-  document.getElementById('origDisplay').textContent = newText;
-  showStatus('Text updated!', 'success');
+/* ─── undo ─── */
+document.getElementById('undoBtn').addEventListener('click',function(){
+  if(!historyStack.length) return;
+  const prev=historyStack.pop();
+  regions=prev.regions;
+  selectedIdx=-1;
+  document.getElementById('editBox').style.display='none';
+  loadImage(prev.dataURL,()=>{ renderList(); showStatus('Undone','info'); });
 });
 
-document.getElementById('undoBtn').addEventListener('click', function() {
-  if (!historyStack.length) return;
-  const prev = historyStack.pop();
-  loadImage(prev, () => { showStatus('Undone', 'info'); });
-});
-
-document.getElementById('downloadBtn').addEventListener('click', function() {
-  const a = document.createElement('a');
-  a.href = canvas.toDataURL('image/png');
-  a.download = 'edited_image.png';
+/* ─── download ─── */
+document.getElementById('downloadBtn').addEventListener('click',function(){
+  // export without any overlays
+  const tmp=document.createElement('canvas');
+  tmp.width=canvas.width; tmp.height=canvas.height;
+  tmp.getContext('2d').drawImage(imgEl,0,0,tmp.width,tmp.height);
+  const a=document.createElement('a');
+  a.href=tmp.toDataURL('image/png');
+  a.download='edited_image.png';
   a.click();
 });
 
-document.getElementById('newText').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('applyBtn').click();
+/* ─── enter key shortcut ─── */
+document.getElementById('newText').addEventListener('keydown',e=>{
+  if(e.key==='Enter') document.getElementById('applyBtn').click();
 });
 </script>
 </body>
